@@ -78,3 +78,205 @@ function scrapeThread(p) {
     messages,
   };
 }
+
+const PENDING = 'pending';
+const STALE_MS = 5 * 60 * 1000;
+
+function waitFor(selector, timeoutMs) {
+  const found = document.querySelector(selector);
+  if (found) return Promise.resolve(found);
+  return new Promise((resolve) => {
+    const observer = new MutationObserver(() => {
+      const el = document.querySelector(selector);
+      if (!el) return;
+      observer.disconnect();
+      clearTimeout(timer);
+      resolve(el);
+    });
+    const timer = setTimeout(() => {
+      observer.disconnect();
+      resolve(null);
+    }, timeoutMs);
+    observer.observe(document.body, { childList: true, subtree: true });
+  });
+}
+
+function insertText(el, text) {
+  el.focus();
+
+  if (el.tagName === 'TEXTAREA') {
+    // React tracks the previous value and reverts a plain assignment.
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, text);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    return;
+  }
+
+  // execCommand is the only API that drives the browser's real editing
+  // pipeline, so React/Angular-controlled contenteditables see a genuine
+  // beforeinput/input pair. Deprecated but load-bearing for every major
+  // rich-text editor, hence the paste fallback below rather than a comment.
+  document.execCommand('selectAll', false, null);
+  document.execCommand('delete', false, null);
+  const ok = document.execCommand('insertText', false, text);
+  el.dispatchEvent(
+    new InputEvent('input', { bubbles: true, data: text, inputType: 'insertText' })
+  );
+  if (ok && el.innerText.trim()) return;
+
+  const dt = new DataTransfer();
+  dt.setData('text/plain', text);
+  el.dispatchEvent(
+    new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
+  );
+}
+
+async function handoff(targetId) {
+  const p = getProvider();
+  if (!p) return { ok: false, error: 'Not a supported AI chat page.' };
+
+  const thread = scrapeThread(p);
+  if (!thread.messages.length) {
+    return { ok: false, error: 'Could not read this conversation.' };
+  }
+
+  await chrome.storage.local.set({
+    [PENDING]: { target: targetId, thread, ts: Date.now() },
+  });
+  return { ok: true, count: thread.messages.length, url: PROVIDERS[targetId].newUrl };
+}
+
+async function consumePending() {
+  const p = getProvider();
+  if (!p) return;
+
+  const { [PENDING]: pending } = await chrome.storage.local.get(PENDING);
+  if (!pending || pending.target !== p.id) return;
+
+  // Clear before injecting: a reload mid-inject must not re-fire the paste.
+  await chrome.storage.local.remove(PENDING);
+  if (Date.now() - pending.ts > STALE_MS) return;
+
+  const text = ChatConnectFormat.toPrompt(pending.thread, p.charLimit);
+  const el = await waitFor(p.composerSel, 10000);
+  if (!el) {
+    return offerClipboard(text, `Couldn't find the ${p.label} composer — are you signed in?`);
+  }
+
+  insertText(el, text);
+  if (!(el.value || el.innerText || '').trim()) {
+    return offerClipboard(text, 'Paste was blocked by the page.');
+  }
+  toast(`Context from ${pending.thread.providerLabel} pasted — review it, then press Enter.`);
+}
+
+const UI_CSS = `
+  :host { all: initial; }
+  .bar {
+    position: fixed; right: 16px; bottom: 96px; z-index: 2147483647;
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 8px; border-radius: 999px;
+    background: #18181b; border: 1px solid #3f3f46;
+    box-shadow: 0 8px 32px rgba(0,0,0,.45);
+    font: 500 12px system-ui, sans-serif; color: #a1a1aa;
+  }
+  .bar button {
+    all: unset; cursor: pointer; padding: 5px 10px; border-radius: 999px;
+    color: #fafafa; background: #27272a; font: 500 12px system-ui, sans-serif;
+  }
+  .bar button:hover { background: #3f3f46; }
+  .toast {
+    position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+    z-index: 2147483647; display: flex; align-items: center; gap: 10px;
+    max-width: 92vw; padding: 10px 16px; border-radius: 12px;
+    background: #18181b; border: 1px solid #3f3f46; color: #fafafa;
+    box-shadow: 0 8px 32px rgba(0,0,0,.5);
+    font: 500 13px system-ui, sans-serif;
+  }
+  .toast button {
+    all: unset; cursor: pointer; padding: 5px 10px; border-radius: 8px;
+    background: #fafafa; color: #18181b; font: 600 12px system-ui, sans-serif;
+  }
+`;
+
+function shadow() {
+  let host = document.getElementById('chat-connect-root');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'chat-connect-root';
+    document.body.appendChild(host);
+    const root = host.attachShadow({ mode: 'open' });
+    const style = document.createElement('style');
+    style.textContent = UI_CSS;
+    root.appendChild(style);
+  }
+  return host.shadowRoot;
+}
+
+function toast(message, actionLabel, onAction) {
+  const root = shadow();
+  root.querySelector('.toast')?.remove();
+
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.append(message);
+
+  if (actionLabel) {
+    const btn = document.createElement('button');
+    btn.textContent = actionLabel;
+    btn.addEventListener('click', () => {
+      onAction();
+      el.remove();
+    });
+    el.appendChild(btn);
+  }
+
+  root.appendChild(el);
+  setTimeout(() => el.remove(), actionLabel ? 20000 : 6000);
+}
+
+// Must stay click-driven: navigator.clipboard needs transient activation,
+// so writing automatically on load would be rejected.
+function offerClipboard(text, message) {
+  toast(message, 'Copy conversation', () => navigator.clipboard.writeText(text));
+}
+
+function mountUI() {
+  const p = getProvider();
+  if (!p) return;
+
+  const root = shadow();
+  if (root.querySelector('.bar')) return;
+
+  const bar = document.createElement('div');
+  bar.className = 'bar';
+  bar.append('Send to');
+
+  for (const target of Object.values(PROVIDERS)) {
+    if (target.id === p.id) continue;
+    const btn = document.createElement('button');
+    btn.textContent = target.label;
+    btn.addEventListener('click', async () => {
+      const r = await handoff(target.id);
+      if (!r.ok) return toast(r.error);
+      const opened = window.open(r.url, '_blank', 'noopener');
+      if (!opened) toast(`Copied ${r.count} messages.`, `Open ${target.label}`, () => window.open(r.url, '_blank'));
+    });
+    bar.appendChild(btn);
+  }
+
+  root.appendChild(bar);
+}
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type !== 'handoff') return;
+  handoff(msg.target).then(sendResponse);
+  return true;
+});
+
+// ponytail: 2s poll rather than a body MutationObserver -- one getElementById
+// per tick, and these SPAs blow the container away on navigation. Swap for an
+// observer only if it ever shows up in a profile.
+mountUI();
+setInterval(mountUI, 2000);
+
+consumePending();
