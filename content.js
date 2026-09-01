@@ -150,12 +150,16 @@ const landed = (el) => (el.value ?? el.innerText ?? '').trim().length;
 // selecting the contents is itself the "clear": both insert paths replace the
 // current selection.
 function prepareComposer(el) {
+  // Gemini re-renders its composer after load, so a node looked up moments ago
+  // may already be detached -- a Range over one throws from addRange.
+  if (!el.isConnected) return false;
   el.focus();
   const range = document.createRange();
   range.selectNodeContents(el);
   const selection = window.getSelection();
   selection.removeAllRanges();
   selection.addRange(range);
+  return true;
 }
 
 // execCommand drives the browser's real editing pipeline, so a React-controlled
@@ -179,37 +183,48 @@ function viaPaste(el, text) {
   );
 }
 
-async function insertText(el, text, pasteFirst) {
+// Takes selectors, not an element. These apps swap the composer node out from
+// under us, and a captured reference goes stale silently: length read back from
+// an orphaned node is 0 forever, so every attempt looks like it failed.
+async function insertText(selectors, text, pasteFirst) {
   // ponytail: 0.5, not 0.9. The failure this catches is "only the first line
   // arrived" (~2% of the text); editors normalise whitespace enough that a
   // strict threshold rejects a paste that actually worked.
   const want = text.trim().length * 0.5;
-  const enough = () => landed(el) >= want;
+  const landedNow = () => {
+    const el = findVisible(selectors);
+    return el ? landed(el) : 0;
+  };
+  const enough = () => landedNow() >= want;
 
-  if (el.tagName === 'TEXTAREA') {
-    el.focus();
-    // React tracks the previous value and reverts a plain assignment.
-    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, text);
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    return waitUntil(enough);
-  }
+  // Re-resolve before every touch, never between a lookup and its use.
+  const attempt = (strategy) => {
+    const el = findVisible(selectors);
+    if (!el) return false;
+
+    if (el.tagName === 'TEXTAREA') {
+      el.focus();
+      // React tracks the previous value and reverts a plain assignment.
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, text);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    }
+
+    if (!prepareComposer(el)) return false;
+    strategy(el, text);
+    return true;
+  };
 
   let best = null;
   for (const strategy of pasteFirst ? [viaPaste, viaExecCommand] : [viaExecCommand, viaPaste]) {
-    // Re-scope the selection every pass: the polling below gives the page a
-    // second to move focus, so doing this once up front leaves the later
-    // attempt writing nowhere.
-    prepareComposer(el);
-    strategy(el, text);
+    if (!attempt(strategy)) continue;
     // Quill processes paste on a timer, hence polling rather than reading back.
     if (await waitUntil(enough)) return true;
-    if (!best || landed(el) > best.len) best = { strategy, len: landed(el) };
+    if (!best || landedNow() > best.len) best = { strategy, len: landedNow() };
   }
 
   // Never leave the composer holding less than some attempt already achieved.
-  if (best && best.len > landed(el)) {
-    prepareComposer(el);
-    best.strategy(el, text);
+  if (best && best.len > landedNow() && attempt(best.strategy)) {
     await waitUntil(enough, 400);
   }
   return false;
@@ -257,21 +272,21 @@ async function consumePending() {
   if (Date.now() - pending.ts > STALE_MS) return;
 
   const text = ChatConnectFormat.toPrompt(pending.thread, p.charLimit);
-  const el = await waitFor(p.composerSel, 10000);
-  if (!el) {
+  if (!(await waitFor(p.composerSel, 10000))) {
     return offerClipboard(text, `Couldn't find the ${p.label} composer — are you signed in?`);
   }
 
   // Checking only for "not empty" was not enough: Gemini kept the opening
   // framing lines and dropped the conversation, which looked like success.
-  const ok = await insertText(el, text, p.pasteFirst);
+  const ok = await insertText(p.composerSel, text, p.pasteFirst);
+  const composer = findVisible(p.composerSel);
   console.log('[Chat Connect] insert', {
     ok,
     provider: p.id,
     expected: text.length,
-    landed: landed(el),
+    landed: composer ? landed(composer) : 0,
     messages: pending.thread.messages.length,
-    composer: el,
+    composer,
   });
   if (!ok) {
     return offerClipboard(text, `Only part of the conversation reached ${p.label}.`);
