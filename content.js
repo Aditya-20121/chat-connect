@@ -28,6 +28,9 @@ const PROVIDERS = {
     bot: { sel: 'model-response', textSel: 'message-content .markdown' },
     composerSel: '.ql-editor[contenteditable="true"]',
     charLimit: 40000,
+    // Quill keeps only the first line of an execCommand insert, so go straight
+    // to the paste path instead of spending a timeout discovering that.
+    pasteFirst: true,
   },
 };
 
@@ -123,7 +126,28 @@ function clearComposer(el) {
   document.execCommand('delete', false, null);
 }
 
-async function insertText(el, text) {
+// execCommand drives the browser's real editing pipeline, so a React-controlled
+// contenteditable sees a genuine beforeinput/input pair. ChatGPT and Claude want
+// this; Quill mangles it, keeping only the first line.
+function viaExecCommand(el, text) {
+  document.execCommand('insertText', false, text);
+  el.dispatchEvent(
+    new InputEvent('input', { bubbles: true, data: text, inputType: 'insertText' })
+  );
+}
+
+// A synthetic paste arrives as one atomic document the editor converts itself,
+// so line breaks survive. ChatGPT turns a large paste into a file attachment
+// chip, which is why this is not simply the default everywhere.
+function viaPaste(el, text) {
+  const dt = new DataTransfer();
+  dt.setData('text/plain', text);
+  el.dispatchEvent(
+    new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
+  );
+}
+
+async function insertText(el, text, pasteFirst) {
   el.focus();
 
   // ponytail: editors normalise whitespace and collapse blank lines, so an
@@ -139,27 +163,15 @@ async function insertText(el, text) {
     return waitUntil(enough);
   }
 
-  // execCommand drives the browser's real editing pipeline, so a
-  // React/Angular-controlled contenteditable sees a genuine beforeinput/input
-  // pair. It is what ChatGPT and Claude want, so it stays first.
-  clearComposer(el);
-  document.execCommand('insertText', false, text);
-  el.dispatchEvent(
-    new InputEvent('input', { bubbles: true, data: text, inputType: 'insertText' })
-  );
-  if (await waitUntil(enough)) return true;
-
-  // Gemini's Quill keeps only the first few lines of a long execCommand insert.
-  // A synthetic paste arrives as one atomic document the editor handles itself,
-  // which survives the full conversation. Quill processes paste on a timer,
-  // hence the polled check rather than reading innerText straight back.
-  clearComposer(el);
-  const dt = new DataTransfer();
-  dt.setData('text/plain', text);
-  el.dispatchEvent(
-    new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
-  );
-  return waitUntil(enough);
+  // Whichever runs first, the other is still tried -- so a provider changing
+  // editor under us costs a slow paste, not a lost conversation.
+  for (const strategy of pasteFirst ? [viaPaste, viaExecCommand] : [viaExecCommand, viaPaste]) {
+    clearComposer(el);
+    strategy(el, text);
+    // Quill processes paste on a timer, hence polling rather than reading back.
+    if (await waitUntil(enough)) return true;
+  }
+  return false;
 }
 
 async function handoff(targetId) {
@@ -196,7 +208,7 @@ async function consumePending() {
 
   // Checking only for "not empty" was not enough: Gemini kept the opening
   // framing lines and dropped the conversation, which looked like success.
-  if (!(await insertText(el, text))) {
+  if (!(await insertText(el, text, p.pasteFirst))) {
     return offerClipboard(text, `Only part of the conversation reached ${p.label}.`);
   }
   toast(`Context from ${pending.thread.providerLabel} pasted — review it, then press Enter.`);
