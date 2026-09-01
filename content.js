@@ -92,12 +92,21 @@ function scrapeThread(p) {
 const PENDING = 'pending';
 const STALE_MS = 5 * 60 * 1000;
 
+// Quill keeps a hidden .ql-clipboard alongside the real editor, and these apps
+// hold offscreen composer instances, so the first match is often not the box on
+// screen. Reading back from the wrong element makes every insert look failed.
+function findVisible(selector) {
+  return (
+    [...document.querySelectorAll(selector)].find((el) => el.getClientRects().length > 0) || null
+  );
+}
+
 function waitFor(selector, timeoutMs) {
-  const found = document.querySelector(selector);
+  const found = findVisible(selector);
   if (found) return Promise.resolve(found);
   return new Promise((resolve) => {
     const observer = new MutationObserver(() => {
-      const el = document.querySelector(selector);
+      const el = findVisible(selector);
       if (!el) return;
       observer.disconnect();
       clearTimeout(timer);
@@ -148,28 +157,39 @@ function viaPaste(el, text) {
 }
 
 async function insertText(el, text, pasteFirst) {
-  el.focus();
-
-  // ponytail: editors normalise whitespace and collapse blank lines, so an
-  // exact length match is not achievable. 0.9 is the calibration knob -- raise
-  // it if a provider starts silently swallowing the tail of a conversation.
-  const want = text.trim().length * 0.9;
+  // ponytail: 0.5, not 0.9. The failure this catches is "only the first line
+  // arrived" (~2% of the text); editors normalise whitespace enough that a
+  // strict threshold rejects a paste that actually worked.
+  const want = text.trim().length * 0.5;
   const enough = () => landed(el) >= want;
 
   if (el.tagName === 'TEXTAREA') {
+    el.focus();
     // React tracks the previous value and reverts a plain assignment.
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, text);
     el.dispatchEvent(new Event('input', { bubbles: true }));
     return waitUntil(enough);
   }
 
-  // Whichever runs first, the other is still tried -- so a provider changing
-  // editor under us costs a slow paste, not a lost conversation.
+  let best = null;
   for (const strategy of pasteFirst ? [viaPaste, viaExecCommand] : [viaExecCommand, viaPaste]) {
+    // Re-focus every pass. execCommand acts on the document selection, and the
+    // polling below gives the page a second to take focus back, so a single
+    // focus() up front leaves the later attempt silently doing nothing.
+    el.focus();
     clearComposer(el);
     strategy(el, text);
     // Quill processes paste on a timer, hence polling rather than reading back.
     if (await waitUntil(enough)) return true;
+    if (!best || landed(el) > best.len) best = { strategy, len: landed(el) };
+  }
+
+  // Never leave the composer holding less than some attempt already achieved.
+  if (best && best.len > landed(el)) {
+    el.focus();
+    clearComposer(el);
+    best.strategy(el, text);
+    await waitUntil(enough, 400);
   }
   return false;
 }
@@ -208,7 +228,16 @@ async function consumePending() {
 
   // Checking only for "not empty" was not enough: Gemini kept the opening
   // framing lines and dropped the conversation, which looked like success.
-  if (!(await insertText(el, text, p.pasteFirst))) {
+  const ok = await insertText(el, text, p.pasteFirst);
+  console.log('[Chat Connect] insert', {
+    ok,
+    provider: p.id,
+    expected: text.length,
+    landed: landed(el),
+    messages: pending.thread.messages.length,
+    composer: el,
+  });
+  if (!ok) {
     return offerClipboard(text, `Only part of the conversation reached ${p.label}.`);
   }
   toast(`Context from ${pending.thread.providerLabel} pasted — review it, then press Enter.`);
