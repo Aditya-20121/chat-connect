@@ -6,7 +6,7 @@ const PROVIDERS = {
     hosts: ['chatgpt.com', 'chat.openai.com'],
     user: { sel: '[data-message-author-role="user"]', textSel: '.whitespace-pre-wrap, .markdown' },
     bot: { sel: '[data-message-author-role="assistant"]', textSel: '.whitespace-pre-wrap, .markdown' },
-    composerSel: '#prompt-textarea, div.ProseMirror[contenteditable="true"]',
+    composerSel: ['#prompt-textarea', 'div.ProseMirror[contenteditable="true"]'],
     charLimit: 40000,
   },
   claude: {
@@ -16,7 +16,10 @@ const PROVIDERS = {
     hosts: ['claude.ai'],
     user: { sel: '[data-testid="user-message"]' },
     bot: { sel: '.font-claude-response' },
-    composerSel: 'div[data-testid="chat-input"][contenteditable="true"]',
+    composerSel: [
+      'div[data-testid="chat-input"][contenteditable="true"]',
+      'div[contenteditable="true"][role="textbox"]',
+    ],
     charLimit: 40000,
   },
   gemini: {
@@ -26,7 +29,11 @@ const PROVIDERS = {
     hosts: ['gemini.google.com'],
     user: { sel: 'user-query-content', textSel: '.query-text, .query-text-line' },
     bot: { sel: 'model-response', textSel: 'message-content .markdown' },
-    composerSel: '.ql-editor[contenteditable="true"]',
+    composerSel: [
+      '.ql-editor[contenteditable="true"]',
+      'rich-textarea div[contenteditable="true"]',
+      'div[contenteditable="true"][role="textbox"]',
+    ],
     charLimit: 40000,
     // Quill keeps only the first line of an execCommand insert, so go straight
     // to the paste path instead of spending a timeout discovering that.
@@ -95,18 +102,24 @@ const STALE_MS = 5 * 60 * 1000;
 // Quill keeps a hidden .ql-clipboard alongside the real editor, and these apps
 // hold offscreen composer instances, so the first match is often not the box on
 // screen. Reading back from the wrong element makes every insert look failed.
-function findVisible(selector) {
-  return (
-    [...document.querySelectorAll(selector)].find((el) => el.getClientRects().length > 0) || null
-  );
+// Selectors are tried in priority order, so a broad fallback never wins over a
+// specific one that also matched.
+function findVisible(selectors) {
+  for (const selector of selectors) {
+    const el = [...document.querySelectorAll(selector)].find(
+      (n) => n.getClientRects().length > 0
+    );
+    if (el) return el;
+  }
+  return null;
 }
 
-function waitFor(selector, timeoutMs) {
-  const found = findVisible(selector);
+function waitFor(selectors, timeoutMs) {
+  const found = findVisible(selectors);
   if (found) return Promise.resolve(found);
   return new Promise((resolve) => {
     const observer = new MutationObserver(() => {
-      const el = findVisible(selector);
+      const el = findVisible(selectors);
       if (!el) return;
       observer.disconnect();
       clearTimeout(timer);
@@ -130,9 +143,19 @@ async function waitUntil(fn, timeoutMs = 1200, stepMs = 100) {
 
 const landed = (el) => (el.value ?? el.innerText ?? '').trim().length;
 
-function clearComposer(el) {
-  document.execCommand('selectAll', false, null);
-  document.execCommand('delete', false, null);
+// execCommand('selectAll') works on whatever the document has focused, so when
+// focus was not inside the composer it selected the entire page -- visibly
+// highlighting the whole UI and leaving the insert with no editable target.
+// An explicit Range is scoped to the element whether or not focus lands, and
+// selecting the contents is itself the "clear": both insert paths replace the
+// current selection.
+function prepareComposer(el) {
+  el.focus();
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
 }
 
 // execCommand drives the browser's real editing pipeline, so a React-controlled
@@ -173,11 +196,10 @@ async function insertText(el, text, pasteFirst) {
 
   let best = null;
   for (const strategy of pasteFirst ? [viaPaste, viaExecCommand] : [viaExecCommand, viaPaste]) {
-    // Re-focus every pass. execCommand acts on the document selection, and the
-    // polling below gives the page a second to take focus back, so a single
-    // focus() up front leaves the later attempt silently doing nothing.
-    el.focus();
-    clearComposer(el);
+    // Re-scope the selection every pass: the polling below gives the page a
+    // second to move focus, so doing this once up front leaves the later
+    // attempt writing nowhere.
+    prepareComposer(el);
     strategy(el, text);
     // Quill processes paste on a timer, hence polling rather than reading back.
     if (await waitUntil(enough)) return true;
@@ -186,8 +208,7 @@ async function insertText(el, text, pasteFirst) {
 
   // Never leave the composer holding less than some attempt already achieved.
   if (best && best.len > landed(el)) {
-    el.focus();
-    clearComposer(el);
+    prepareComposer(el);
     best.strategy(el, text);
     await waitUntil(enough, 400);
   }
