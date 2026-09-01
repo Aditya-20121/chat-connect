@@ -43,7 +43,14 @@ const STRIP =
 function extractText(node, spec) {
   // Query the live node before cloning: cloning a custom element (Gemini's
   // <user-query-content>) re-runs its upgrade lifecycle offscreen.
-  const parts = spec.textSel ? [...node.querySelectorAll(spec.textSel)] : [node];
+  // Drop matches nested inside other matches, or the text is counted twice --
+  // Gemini's .query-text is the parent of its own .query-text-line children.
+  // ponytail: O(n^2), but n is the handful of blocks in one message.
+  const parts = spec.textSel
+    ? [...node.querySelectorAll(spec.textSel)].filter(
+        (el, _i, all) => !all.some((other) => other !== el && other.contains(el))
+      )
+    : [node];
   return parts
     .map((el) => {
       const clone = el.cloneNode(true);
@@ -101,33 +108,58 @@ function waitFor(selector, timeoutMs) {
   });
 }
 
-function insertText(el, text) {
+async function waitUntil(fn, timeoutMs = 1200, stepMs = 100) {
+  for (let waited = 0; waited < timeoutMs; waited += stepMs) {
+    if (fn()) return true;
+    await new Promise((r) => setTimeout(r, stepMs));
+  }
+  return fn();
+}
+
+const landed = (el) => (el.value ?? el.innerText ?? '').trim().length;
+
+function clearComposer(el) {
+  document.execCommand('selectAll', false, null);
+  document.execCommand('delete', false, null);
+}
+
+async function insertText(el, text) {
   el.focus();
+
+  // ponytail: editors normalise whitespace and collapse blank lines, so an
+  // exact length match is not achievable. 0.9 is the calibration knob -- raise
+  // it if a provider starts silently swallowing the tail of a conversation.
+  const want = text.trim().length * 0.9;
+  const enough = () => landed(el) >= want;
 
   if (el.tagName === 'TEXTAREA') {
     // React tracks the previous value and reverts a plain assignment.
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, text);
     el.dispatchEvent(new Event('input', { bubbles: true }));
-    return;
+    return waitUntil(enough);
   }
 
-  // execCommand is the only API that drives the browser's real editing
-  // pipeline, so React/Angular-controlled contenteditables see a genuine
-  // beforeinput/input pair. Deprecated but load-bearing for every major
-  // rich-text editor, hence the paste fallback below rather than a comment.
-  document.execCommand('selectAll', false, null);
-  document.execCommand('delete', false, null);
-  const ok = document.execCommand('insertText', false, text);
+  // execCommand drives the browser's real editing pipeline, so a
+  // React/Angular-controlled contenteditable sees a genuine beforeinput/input
+  // pair. It is what ChatGPT and Claude want, so it stays first.
+  clearComposer(el);
+  document.execCommand('insertText', false, text);
   el.dispatchEvent(
     new InputEvent('input', { bubbles: true, data: text, inputType: 'insertText' })
   );
-  if (ok && el.innerText.trim()) return;
+  if (await waitUntil(enough)) return true;
 
+  // Gemini's Quill keeps only the first few lines of a long execCommand insert.
+  // A synthetic paste arrives as one atomic document the editor handles itself,
+  // which survives the full conversation. Quill processes paste on a timer,
+  // hence the polled check rather than reading innerText straight back.
+  clearComposer(el);
   const dt = new DataTransfer();
   dt.setData('text/plain', text);
   el.dispatchEvent(
     new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
   );
+  return waitUntil(enough);
 }
 
 async function handoff(targetId) {
@@ -162,9 +194,10 @@ async function consumePending() {
     return offerClipboard(text, `Couldn't find the ${p.label} composer — are you signed in?`);
   }
 
-  insertText(el, text);
-  if (!(el.value || el.innerText || '').trim()) {
-    return offerClipboard(text, 'Paste was blocked by the page.');
+  // Checking only for "not empty" was not enough: Gemini kept the opening
+  // framing lines and dropped the conversation, which looked like success.
+  if (!(await insertText(el, text))) {
+    return offerClipboard(text, `Only part of the conversation reached ${p.label}.`);
   }
   toast(`Context from ${pending.thread.providerLabel} pasted — review it, then press Enter.`);
 }
