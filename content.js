@@ -194,9 +194,24 @@ async function insertText(el, text, pasteFirst) {
   return false;
 }
 
+// Reloading or updating the extension orphans the content scripts already
+// running in open tabs: they keep working, but every chrome.* call throws
+// "Extension context invalidated". Checked rather than caught, so the button
+// reports it instead of failing as an unhandled rejection with nothing staged.
+function alive() {
+  try {
+    return Boolean(chrome.runtime?.id);
+  } catch {
+    return false;
+  }
+}
+
 async function handoff(targetId) {
   const p = getProvider();
   if (!p) return { ok: false, error: 'Not a supported AI chat page.' };
+  if (!alive()) {
+    return { ok: false, error: 'Chat Connect was updated — reload this page, then try again.' };
+  }
 
   const thread = scrapeThread(p);
   if (!thread.messages.length) {
@@ -351,6 +366,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 // per tick, and these SPAs blow the container away on navigation. Swap for an
 // observer only if it ever shows up in a profile.
 mountUI();
-setInterval(mountUI, 2000);
+const uiTimer = setInterval(() => {
+  // Once orphaned this script can only offer a button that throws, so take the
+  // bar away and leave the page to the fresh script on next load.
+  if (!alive()) {
+    clearInterval(uiTimer);
+    document.getElementById('chat-connect-root')?.remove();
+    return;
+  }
+  mountUI();
+}, 2000);
 
 consumePending();
