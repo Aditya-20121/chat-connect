@@ -1,0 +1,48 @@
+const assert = require('node:assert');
+const { fitToLimit, toPrompt } = require('../lib/format.js');
+
+const thread = (messages) => ({
+  providerLabel: 'ChatGPT',
+  title: 'Test',
+  url: 'https://chatgpt.com/c/1',
+  messages,
+});
+
+const short = [
+  { role: 'user', text: 'first question' },
+  { role: 'assistant', text: 'first answer' },
+  { role: 'user', text: 'last question' },
+];
+
+// framing and labels
+const p = toPrompt(thread(short), 40000);
+assert.ok(p.includes('conversation I had with ChatGPT'), 'framing line missing');
+assert.ok(p.includes('**Me:**'), 'user label missing');
+assert.ok(p.includes('**ChatGPT:**'), 'source label missing');
+assert.ok(!p.includes('Assistant:'), 'must not label turns Assistant: -- the target model would think it wrote them');
+
+// under budget keeps everything
+const under = fitToLimit(short, 40000);
+assert.strictEqual(under.dropped, 0);
+assert.strictEqual(under.messages.length, 3);
+
+// over budget: bounded, keeps first user turn and the newest turn
+const long = Array.from({ length: 50 }, (_, i) => ({
+  role: i % 2 ? 'assistant' : 'user',
+  text: `msg ${i} ` + 'x'.repeat(200),
+}));
+const over = fitToLimit(long, 2000);
+assert.ok(over.dropped > 0, 'expected messages to be dropped');
+assert.strictEqual(over.messages[0], long[0], 'first user turn must survive');
+assert.strictEqual(over.messages.at(-1), long.at(-1), 'newest turn must survive');
+assert.ok(
+  over.messages.reduce((n, m) => n + m.text.length + 16, 0) <= 2000,
+  'kept messages exceed the limit'
+);
+assert.ok(toPrompt(thread(long), 2000).includes('omitted for length'), 'truncation marker missing');
+
+// degenerate input
+assert.doesNotThrow(() => toPrompt(thread([]), 40000));
+assert.doesNotThrow(() => toPrompt({ messages: undefined }, 40000));
+
+console.log('format: all assertions passed');
