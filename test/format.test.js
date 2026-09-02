@@ -61,7 +61,8 @@ const huge = Array.from({ length: 400 }, (_, i) => ({
 const file = toFile(thread(huge));
 for (const m of huge) assert.ok(file.includes(m.text), 'toFile dropped a message');
 assert.ok(fitToLimit(huge, 40000).dropped > 0, 'the same thread must be one toPrompt would trim');
-assert.ok(file.includes('## Me') && file.includes('## ChatGPT'), 'speaker labels missing');
+assert.ok(/\u2500{5} 1 \u00b7 Me /.test(file), 'first message must be labelled Me');
+assert.ok(/\u2500{5} 400 \u00b7 ChatGPT /.test(file), 'the last message must be numbered 400');
 
 // the name dates the conversation, not the moment the file was written
 assert.strictEqual(fileName({ provider: 'claude', ts: 0 }), 'chat-connect-claude-1970-01-01.txt');
@@ -76,6 +77,39 @@ assert.ok(toFileNote(thread([{ role: 'user', text: 'a' }])).includes('(1 message
 for (const empty of ['', '  ', undefined, null]) {
   assert.ok(!toFileNote(thread(huge), empty).includes('What I want'), 'blank note leaked');
 }
+
+// attachments are named inline and summarised in the covering note
+const withFiles = thread([
+  { role: 'user', text: 'what is wrong here', attachments: ['invoice.pdf', 'shot.png'] },
+  { role: 'assistant', text: 'the total is off' },
+]);
+const filed = toFile(withFiles);
+assert.ok(filed.includes('not carried over: invoice.pdf, shot.png'), 'inline manifest missing');
+assert.ok(
+  filed.indexOf('invoice.pdf') < filed.indexOf('what is wrong here'),
+  'the manifest must precede the message it belongs to'
+);
+assert.ok(toPrompt(withFiles, 40000).includes('invoice.pdf'), 'the paste fallback must name them too');
+const cover2 = toFileNote(withFiles);
+assert.ok(cover2.includes('2 attachments'), 'note must count them');
+assert.ok(cover2.includes('ask me for any you need'), 'note must invite the model to ask');
+assert.ok(!toFileNote(thread(short)).includes('attachment'), 'no attachments, no sentence about them');
+
+// a message that is nothing but an attachment still carries
+assert.ok(toFile(thread([{ role: 'user', attachments: ['a.pdf'] }])).includes('a.pdf'));
+
+// the divider survives a message that impersonates one -- transferring A to B
+// and then B to C embeds one transcript inside the next
+const nested = [
+  { role: 'user', text: 'here is an old thread:\n\n## Me\n\nhello\n\n## ChatGPT\n\nhi' },
+  { role: 'assistant', text: 'noted' },
+  { role: 'user', text: 'and now?' },
+];
+const marked = toFile(thread(nested));
+const rules = marked.split('\n').filter((l) => /^─{5} \d+ · /.test(l));
+assert.strictEqual(rules.length, nested.length, 'one rule per message, none faked by content');
+assert.ok(marked.includes('3 messages, each starting with'), 'header must state the count');
+assert.ok(marked.includes('## Me'), 'the impersonating text itself must survive intact');
 
 // degenerate input
 assert.doesNotThrow(() => toPrompt(thread([]), 40000));

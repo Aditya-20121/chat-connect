@@ -82,12 +82,45 @@ function extractText(node, spec) {
     .trim();
 }
 
+// Anything that looks like a filename. Deliberately not a guess at each app's
+// chip markup, which is the most redesigned part of these pages.
+const FILE_RE = /[^\s/\\]+\.(pdf|docx?|xlsx?|csv|txt|pptx?|png|jpe?g|gif|webp|svg|zip|json|md)$/i;
+
+// What the user attached, by name only -- the bytes stay behind. Silence about
+// them is the worst option: the target model reasons confidently around a hole
+// it cannot see, and a name at least lets it ask.
+//
+// Chips are read from user turns only. An assistant that mentions config.json
+// in prose would otherwise be reported as having uploaded one.
+function extractAttachments(node, isUser) {
+  const names = [];
+  const add = (name) => names.includes(name) || names.push(name);
+
+  for (const img of node.querySelectorAll('img')) {
+    const { width, height } = img.getBoundingClientRect();
+    // Avatars, provider logos, inline icons.
+    if (width < 40 || height < 40) continue;
+    add(img.alt?.trim() || `image ${names.length + 1}`);
+  }
+  if (!isUser) return names;
+
+  for (const el of node.querySelectorAll('*')) {
+    if (el.children.length) continue;
+    const text = el.textContent.trim();
+    if (text.length < 80 && FILE_RE.test(text)) add(text);
+  }
+  return names;
+}
+
 function scrapeThread(p) {
   const messages = [];
   for (const node of document.querySelectorAll(`${p.user.sel}, ${p.bot.sel}`)) {
     const isUser = node.matches(p.user.sel);
     const text = extractText(node, isUser ? p.user : p.bot);
-    if (text) messages.push({ role: isUser ? 'user' : 'assistant', text });
+    const attachments = extractAttachments(node, isUser);
+    if (text || attachments.length) {
+      messages.push({ role: isUser ? 'user' : 'assistant', text, attachments });
+    }
   }
   return {
     v: 1,
@@ -418,52 +451,78 @@ const UI_CSS = `
   :host { all: initial; }
   .bar {
     position: fixed; right: 16px; bottom: 96px; z-index: 2147483647;
-    display: flex; align-items: center; gap: 6px;
-    padding: 6px 8px; border-radius: 999px;
-    background: #18181b; border: 1px solid #3f3f46;
-    box-shadow: 0 8px 32px rgba(0,0,0,.45);
+    display: flex; align-items: center; gap: 7px;
+    padding: 5px 8px; border-radius: 999px;
+    background: rgba(24,24,27,.92); border: 1px solid #3f3f46;
+    box-shadow: 0 10px 34px rgba(0,0,0,.5);
+    backdrop-filter: blur(8px);
     font: 500 12px system-ui, sans-serif; color: #a1a1aa;
+    /* Eases the snap back from the edge; off during a drag, where it would
+       lag the pointer. */
+    transition: left .15s ease, top .15s ease;
   }
-  .bar button {
-    all: unset; cursor: pointer; padding: 5px 10px; border-radius: 999px;
-    color: #fafafa; background: #27272a; font: 500 12px system-ui, sans-serif;
-  }
-  .bar button:hover { background: #3f3f46; }
-  /* Eases the snap back from the edge; off during a drag, where it would lag
-     the pointer. */
-  .bar { transition: left .15s ease, top .15s ease; }
   .bar.dragging { transition: none; }
+  .bar .label { padding: 0 4px 0 2px; color: #71717a; white-space: nowrap; }
+
+  .bar button {
+    all: unset; box-sizing: border-box; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    height: 26px; padding: 0 11px; border-radius: 999px;
+    color: #fafafa; background: #27272a;
+    font: 500 12px system-ui, sans-serif;
+    transition: background .12s ease, color .12s ease;
+  }
+  .bar button:hover { background: #52525b; }
+  .bar button:active { transform: translateY(.5px); }
+  /* Keyboard users get the same affordance the mouse does; :focus-visible so a
+     click does not leave a ring behind. */
+  .bar button:focus-visible, .bar input:focus-visible, .tab:focus-visible {
+    outline: 2px solid #818cf8; outline-offset: 2px;
+  }
+
+  .bar .icon { width: 26px; padding: 0; background: transparent; color: #a1a1aa; }
+  .bar .icon:hover { background: #3f3f46; color: #fafafa; }
+  .bar .icon svg { width: 14px; height: 14px; display: block; }
+  .group { display: inline-flex; align-items: center; gap: 3px; }
+  .sep { width: 1px; height: 18px; background: #3f3f46; flex: none; }
+
   .grip {
-    cursor: grab; padding: 0 2px; color: #52525b; font-size: 14px;
+    cursor: grab; padding: 0 3px; color: #52525b; font-size: 13px;
     line-height: 1; user-select: none;
   }
+  .grip:hover { color: #a1a1aa; }
   .bar.dragging .grip { cursor: grabbing; }
-  .bar .hide { padding: 5px 8px; color: #a1a1aa; background: transparent; }
+
+  .bar input {
+    all: unset; box-sizing: border-box; width: 132px; height: 26px;
+    padding: 0 11px; border-radius: 999px;
+    background: #27272a; color: #fafafa; font: 400 12px system-ui, sans-serif;
+    transition: width .15s ease, background .12s ease;
+  }
+  .bar input::placeholder { color: #71717a; }
+  .bar input:focus { width: 216px; background: #3f3f46; }
+
   .tab {
     /* right, always: a fixed element with no horizontal anchor falls back to
        its static position, which put the collapsed tab on the left. */
     position: fixed; right: 0; z-index: 2147483647; cursor: pointer;
-    padding: 10px 5px; border: 1px solid #3f3f46; border-right: none;
-    border-radius: 8px 0 0 8px; background: #18181b; color: #a1a1aa;
-    font: 600 10px system-ui, sans-serif; letter-spacing: .08em;
+    padding: 11px 5px; border: 1px solid #3f3f46; border-right: none;
+    border-radius: 9px 0 0 9px; background: rgba(24,24,27,.92); color: #a1a1aa;
+    box-shadow: -4px 0 18px rgba(0,0,0,.35); backdrop-filter: blur(8px);
+    font: 600 10px system-ui, sans-serif; letter-spacing: .09em;
     writing-mode: vertical-rl;
+    transition: color .12s ease, background .12s ease;
   }
   .tab:hover { color: #fafafa; background: #27272a; }
   /* Without this a touch drag scrolls the page instead of moving the bar. */
   .bar, .tab { touch-action: none; }
-  .bar input {
-    all: unset; width: 120px; padding: 5px 10px; border-radius: 999px;
-    background: #27272a; color: #fafafa; font: 400 12px system-ui, sans-serif;
-    transition: width .15s ease;
-  }
-  .bar input::placeholder { color: #71717a; }
-  .bar input:focus { width: 220px; background: #3f3f46; }
+
   .toast {
     position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
     z-index: 2147483647; display: flex; align-items: center; gap: 10px;
     max-width: 92vw; padding: 10px 16px; border-radius: 12px;
-    background: #18181b; border: 1px solid #3f3f46; color: #fafafa;
-    box-shadow: 0 8px 32px rgba(0,0,0,.5);
+    background: rgba(24,24,27,.95); border: 1px solid #3f3f46; color: #fafafa;
+    box-shadow: 0 10px 34px rgba(0,0,0,.5); backdrop-filter: blur(8px);
     font: 500 13px system-ui, sans-serif;
   }
   .toast button {
@@ -471,6 +530,28 @@ const UI_CSS = `
     background: #fafafa; color: #18181b; font: 600 12px system-ui, sans-serif;
   }
 `;
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+// Inline rather than an <img>: a shadow-root <img> would need a web-accessible
+// resource, and these pages' CSP has opinions about where images come from.
+function icon(d) {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  for (const [k, v] of Object.entries({
+    viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+    'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+    'aria-hidden': 'true',
+  })) {
+    svg.setAttribute(k, v);
+  }
+  const path = document.createElementNS(SVG_NS, 'path');
+  path.setAttribute('d', d);
+  svg.appendChild(path);
+  return svg;
+}
+
+const ICON_DOWNLOAD = 'M12 3v11m0 0l-4-4m4 4l4-4M5 20h14';
+const ICON_COLLAPSE = 'M9 5l7 7-7 7';
 
 function shadow() {
   let host = document.getElementById('chat-connect-root');
@@ -625,6 +706,16 @@ function mountUI() {
     tab.className = 'tab';
     tab.textContent = 'SEND';
     tab.title = 'Show Chat Connect';
+    // The only way back to the bar, so it cannot be mouse-only.
+    tab.tabIndex = 0;
+    tab.setAttribute('role', 'button');
+    tab.setAttribute('aria-label', tab.title);
+    tab.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      ui.hidden = false;
+      rerender();
+    });
     // The tab keeps the bar's own vertical position, so it reappears where it
     // was put rather than jumping back to a default corner.
     tab.style.top = ui.y == null ? '' : `${ui.y}px`;
@@ -662,12 +753,29 @@ function mountUI() {
   const bar = document.createElement('div');
   bar.className = 'bar';
 
+  // Three groups, each fenced by a rule: the handle, what to send and where,
+  // and what to do with it locally. Tight inside a group, loose between them,
+  // so the grouping reads without having to think about it.
+  const group = () => {
+    const el = document.createElement('span');
+    el.className = 'group';
+    bar.appendChild(el);
+    return el;
+  };
+  const rule = () => {
+    const el = document.createElement('span');
+    el.className = 'sep';
+    bar.appendChild(el);
+  };
+
   const grip = document.createElement('span');
   grip.className = 'grip';
   grip.textContent = '⠿';
   grip.title = 'Drag to move';
   bar.appendChild(grip);
+  rule();
 
+  const send = group();
   const note = document.createElement('input');
   note.type = 'text';
   note.placeholder = 'what to focus on (optional)';
@@ -678,8 +786,12 @@ function mountUI() {
   for (const type of ['keydown', 'keyup', 'keypress']) {
     note.addEventListener(type, (e) => e.stopPropagation());
   }
-  bar.appendChild(note);
-  bar.append('Send to');
+  send.appendChild(note);
+
+  const label = document.createElement('span');
+  label.className = 'label';
+  label.textContent = 'Send to';
+  send.appendChild(label);
 
   for (const target of Object.values(PROVIDERS)) {
     if (target.id === p.id) continue;
@@ -691,24 +803,30 @@ function mountUI() {
       const opened = window.open(r.url, '_blank', 'noopener');
       if (!opened) toast(`Copied ${r.count} messages.`, `Open ${target.label}`, () => window.open(r.url, '_blank'));
     });
-    bar.appendChild(btn);
+    send.appendChild(btn);
   }
 
+  rule();
+  const local = group();
+
   const save = document.createElement('button');
-  save.textContent = '.txt';
+  save.className = 'icon';
+  save.appendChild(icon(ICON_DOWNLOAD));
   save.title = 'Download the whole conversation as a text file';
+  save.setAttribute('aria-label', save.title);
   save.addEventListener('click', () => saveThread(p));
-  bar.appendChild(save);
+  local.appendChild(save);
 
   const hide = document.createElement('button');
-  hide.className = 'hide';
-  hide.textContent = '×';
+  hide.className = 'icon';
+  hide.appendChild(icon(ICON_COLLAPSE));
   hide.title = 'Collapse to the edge';
+  hide.setAttribute('aria-label', hide.title);
   hide.addEventListener('click', () => {
     ui.hidden = true;
     rerender();
   });
-  bar.appendChild(hide);
+  local.appendChild(hide);
 
   root.appendChild(bar);
   place(bar);
