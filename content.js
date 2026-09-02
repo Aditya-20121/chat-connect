@@ -312,6 +312,20 @@ async function attachFile(selectors, name, text, strategies = ATTACH) {
   return false;
 }
 
+// What the PROVIDERS entry currently matches on this page. These sites
+// redesign often, and every failure otherwise reads as the same unhelpful
+// "could not read this conversation".
+function health(p) {
+  return {
+    provider: p.id,
+    user: document.querySelectorAll(p.user.sel).length,
+    bot: document.querySelectorAll(p.bot.sel).length,
+    composer: p.composerSel.find((sel) => findVisible([sel])) || null,
+    fileInputs: document.querySelectorAll('input[type="file"]').length,
+    attach: p.attach || ATTACH,
+  };
+}
+
 // Reloading or updating the extension orphans the content scripts already
 // running in open tabs: they keep working, but every chrome.* call throws
 // "Extension context invalidated". Checked rather than caught, so the button
@@ -333,7 +347,18 @@ async function handoff(targetId, note) {
 
   const thread = scrapeThread(p);
   if (!thread.messages.length) {
-    return { ok: false, error: 'Could not read this conversation.' };
+    // Which selector went stale is the whole diagnosis, and these sites
+    // redesign often enough that it is worth saying out loud. Logged rather
+    // than rendered: it means nothing to whoever is just trying to send a
+    // conversation.
+    const h = health(p);
+    console.log('[Chat Connect] health', h);
+    return {
+      ok: false,
+      error: h.user + h.bot === 0
+        ? `Could not read this ${p.label} conversation — its layout has probably changed.`
+        : 'Could not read this conversation.',
+    };
   }
 
   await chrome.storage.local.set({
@@ -404,6 +429,28 @@ const UI_CSS = `
     color: #fafafa; background: #27272a; font: 500 12px system-ui, sans-serif;
   }
   .bar button:hover { background: #3f3f46; }
+  /* Eases the snap back from the edge; off during a drag, where it would lag
+     the pointer. */
+  .bar { transition: left .15s ease, top .15s ease; }
+  .bar.dragging { transition: none; }
+  .grip {
+    cursor: grab; padding: 0 2px; color: #52525b; font-size: 14px;
+    line-height: 1; user-select: none;
+  }
+  .bar.dragging .grip { cursor: grabbing; }
+  .bar .hide { padding: 5px 8px; color: #a1a1aa; background: transparent; }
+  .tab {
+    /* right, always: a fixed element with no horizontal anchor falls back to
+       its static position, which put the collapsed tab on the left. */
+    position: fixed; right: 0; z-index: 2147483647; cursor: pointer;
+    padding: 10px 5px; border: 1px solid #3f3f46; border-right: none;
+    border-radius: 8px 0 0 8px; background: #18181b; color: #a1a1aa;
+    font: 600 10px system-ui, sans-serif; letter-spacing: .08em;
+    writing-mode: vertical-rl;
+  }
+  .tab:hover { color: #fafafa; background: #27272a; }
+  /* Without this a touch drag scrolls the page instead of moving the bar. */
+  .bar, .tab { touch-action: none; }
   .bar input {
     all: unset; width: 120px; padding: 5px 10px; border-radius: 999px;
     background: #27272a; color: #fafafa; font: 400 12px system-ui, sans-serif;
@@ -485,19 +532,147 @@ function saveThread(p) {
   toast(`Saved ${thread.messages.length} messages as ${a.download}`);
 }
 
+const UI_KEY = 'ui';
+// x/y null means "wherever the stylesheet puts it". Kept in a module variable
+// as well as storage because the SPA blows the container away on navigation and
+// the bar is rebuilt synchronously, with no time to await a read.
+let ui = { x: null, y: null, hidden: false };
+// Survives a rebuild too -- losing what you typed because you collapsed the bar
+// would be its own small betrayal.
+let noteText = '';
+
+async function loadUI() {
+  if (!alive()) return;
+  try {
+    const stored = (await chrome.storage.local.get(UI_KEY))[UI_KEY];
+    if (stored) ui = { ...ui, ...stored };
+  } catch {}
+}
+
+function saveUI() {
+  if (!alive()) return;
+  chrome.storage.local.set({ [UI_KEY]: ui }).catch(() => {});
+}
+
+const clamp = (n, max) => Math.max(0, Math.min(n, max));
+
+// Re-clamped on every placement, not just on drop: a window resized smaller
+// since the position was saved would otherwise strand the bar off-screen with
+// no way to get it back.
+//
+// While dragging the right edge is open, so the bar slides off the screen
+// instead of stopping dead against it. Anything still on screen at drop is
+// pulled back in; a bar pushed far enough past the edge is taken as put away.
+function place(el, dragging) {
+  if (ui.x == null) return;
+  const { width, height } = el.getBoundingClientRect();
+  ui.x = clamp(ui.x, dragging ? window.innerWidth : window.innerWidth - width);
+  ui.y = clamp(ui.y, window.innerHeight - height);
+  Object.assign(el.style, { left: `${ui.x}px`, top: `${ui.y}px`, right: 'auto', bottom: 'auto' });
+}
+
+function draggable(el) {
+  el.addEventListener('pointerdown', (e) => {
+    // The controls are the point of the bar; only the space around them drags.
+    if (e.target.closest('button, input')) return;
+    const rect = el.getBoundingClientRect();
+    const offsetX = e.clientX - rect.left;
+    const offsetY = e.clientY - rect.top;
+    el.setPointerCapture(e.pointerId);
+    el.classList.add('dragging');
+
+    const move = (ev) => {
+      ui.x = ev.clientX - offsetX;
+      ui.y = ev.clientY - offsetY;
+      place(el, true);
+    };
+    const drop = () => {
+      el.removeEventListener('pointermove', move);
+      el.classList.remove('dragging');
+      // A third of the way off the edge is a decision, not a slip: collapse
+      // rather than snapping it back and undoing what was just done.
+      if (ui.x + rect.width - window.innerWidth > rect.width / 3) {
+        ui.hidden = true;
+        saveUI();
+        return mountUI();
+      }
+      place(el);
+      saveUI();
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', drop, { once: true });
+    el.addEventListener('pointercancel', drop, { once: true });
+    // Otherwise the drag selects the page text underneath it.
+    e.preventDefault();
+  });
+}
+
 function mountUI() {
   const p = getProvider();
   if (!p) return;
 
   const root = shadow();
-  if (root.querySelector('.bar')) return;
+  if (root.querySelector(ui.hidden ? '.tab' : '.bar')) return;
+  root.querySelector('.bar, .tab')?.remove();
+
+  const rerender = () => {
+    saveUI();
+    mountUI();
+  };
+
+  if (ui.hidden) {
+    const tab = document.createElement('div');
+    tab.className = 'tab';
+    tab.textContent = 'SEND';
+    tab.title = 'Show Chat Connect';
+    // The tab keeps the bar's own vertical position, so it reappears where it
+    // was put rather than jumping back to a default corner.
+    tab.style.top = ui.y == null ? '' : `${ui.y}px`;
+    tab.style.bottom = ui.y == null ? '96px' : 'auto';
+    // Both a button and a handle. A press that never really moved is a click
+    // to reopen; anything more is a drag along the edge, and must not reopen
+    // the bar on release.
+    tab.addEventListener('pointerdown', (e) => {
+      const offsetY = e.clientY - tab.getBoundingClientRect().top;
+      let moved = false;
+      tab.setPointerCapture(e.pointerId);
+
+      const move = (ev) => {
+        if (Math.abs(ev.clientY - e.clientY) > 3) moved = true;
+        if (!moved) return;
+        ui.y = clamp(ev.clientY - offsetY, window.innerHeight - tab.offsetHeight);
+        Object.assign(tab.style, { top: `${ui.y}px`, bottom: 'auto' });
+      };
+      const up = () => {
+        tab.removeEventListener('pointermove', move);
+        if (moved) return saveUI();
+        ui.hidden = false;
+        rerender();
+      };
+
+      tab.addEventListener('pointermove', move);
+      tab.addEventListener('pointerup', up, { once: true });
+      tab.addEventListener('pointercancel', up, { once: true });
+      e.preventDefault();
+    });
+    root.appendChild(tab);
+    return;
+  }
 
   const bar = document.createElement('div');
   bar.className = 'bar';
 
+  const grip = document.createElement('span');
+  grip.className = 'grip';
+  grip.textContent = '⠿';
+  grip.title = 'Drag to move';
+  bar.appendChild(grip);
+
   const note = document.createElement('input');
   note.type = 'text';
   note.placeholder = 'what to focus on (optional)';
+  note.value = noteText;
+  note.addEventListener('input', () => (noteText = note.value));
   // These apps bind single-key shortcuts on the document, so a keystroke that
   // escapes this box focuses their composer or opens a panel mid-sentence.
   for (const type of ['keydown', 'keyup', 'keypress']) {
@@ -525,7 +700,19 @@ function mountUI() {
   save.addEventListener('click', () => saveThread(p));
   bar.appendChild(save);
 
+  const hide = document.createElement('button');
+  hide.className = 'hide';
+  hide.textContent = '×';
+  hide.title = 'Collapse to the edge';
+  hide.addEventListener('click', () => {
+    ui.hidden = true;
+    rerender();
+  });
+  bar.appendChild(hide);
+
   root.appendChild(bar);
+  place(bar);
+  draggable(bar);
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -537,7 +724,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 // ponytail: 2s poll rather than a body MutationObserver -- one getElementById
 // per tick, and these SPAs blow the container away on navigation. Swap for an
 // observer only if it ever shows up in a profile.
-mountUI();
+loadUI().then(mountUI);
 const uiTimer = setInterval(() => {
   // Once orphaned this script can only offer a button that throws, so take the
   // bar away and leave the page to the fresh script on next load.
