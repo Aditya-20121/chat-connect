@@ -1,5 +1,5 @@
 const assert = require('node:assert');
-const { fitToLimit, toPrompt } = require('../lib/format.js');
+const { fitToLimit, toPrompt, toFile, fileName } = require('../lib/format.js');
 
 const thread = (messages) => ({
   providerLabel: 'ChatGPT',
@@ -51,6 +51,21 @@ assert.ok(
   'kept messages exceed the limit'
 );
 assert.ok(toPrompt(thread(long), 2000).includes('omitted for length'), 'truncation marker missing');
+
+// the .txt carries the whole thread however long -- this is the guarantee the
+// file format exists for, and the one toPrompt cannot make
+const huge = Array.from({ length: 400 }, (_, i) => ({
+  role: i % 2 ? 'assistant' : 'user',
+  text: `msg ${i} ` + 'x'.repeat(2000),
+}));
+const file = toFile(thread(huge));
+for (const m of huge) assert.ok(file.includes(m.text), 'toFile dropped a message');
+assert.ok(fitToLimit(huge, 40000).dropped > 0, 'the same thread must be one toPrompt would trim');
+assert.ok(file.includes('## Me') && file.includes('## ChatGPT'), 'speaker labels missing');
+
+// the name dates the conversation, not the moment the file was written
+assert.strictEqual(fileName({ provider: 'claude', ts: 0 }), 'chat-connect-claude-1970-01-01.txt');
+assert.ok(fileName({}).startsWith('chat-connect-chat-'), 'unknown provider must still name a file');
 
 // degenerate input
 assert.doesNotThrow(() => toPrompt(thread([]), 40000));

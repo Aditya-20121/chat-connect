@@ -372,6 +372,24 @@ function offerClipboard(text, message) {
   toast(message, 'Copy conversation', () => navigator.clipboard.writeText(text));
 }
 
+// A detached anchor is enough for a download in Chrome, and the object URL is
+// revoked on a timer rather than straight after click -- revoking synchronously
+// races the download and can cancel it.
+function saveThread(p) {
+  const thread = scrapeThread(p);
+  if (!thread.messages.length) return toast('Could not read this conversation.');
+
+  const url = URL.createObjectURL(
+    new Blob([ChatConnectFormat.toFile(thread)], { type: 'text/plain' })
+  );
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = ChatConnectFormat.fileName(thread);
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+  toast(`Saved ${thread.messages.length} messages as ${a.download}`);
+}
+
 function mountUI() {
   const p = getProvider();
   if (!p) return;
@@ -405,6 +423,12 @@ function mountUI() {
     });
     bar.appendChild(btn);
   }
+
+  const save = document.createElement('button');
+  save.textContent = '.txt';
+  save.title = 'Download the whole conversation as a text file';
+  save.addEventListener('click', () => saveThread(p));
+  bar.appendChild(save);
 
   root.appendChild(bar);
 }
