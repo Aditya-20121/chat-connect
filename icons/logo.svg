@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <title>Chat Connect</title>
+  <!-- Source of truth for the PNGs. Shapes are deliberately heavy: thin
+       strokes silt up at 16px, which is the size that actually gets seen. -->
+  <rect width="128" height="128" rx="28" fill="#6366f1"/>
+  <g fill="#fafafa">
+    <rect x="16.6" y="20.5" width="94.7" height="64" rx="18"/>
+    <polygon points="33.3,79.4 33.3,112.6 61.4,79.4"/>
+  </g>
+  <g fill="#3730a3">
+    <rect x="32" y="46.7" width="44.8" height="14.1" rx="5"/>
+    <polygon points="69.1,30.7 99.8,53.8 69.1,76.8"/>
+  </g>
+</svg>
