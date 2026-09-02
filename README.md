@@ -57,11 +57,20 @@ node test/format.test.js
 Covers the pure formatting and truncation logic. The scrape and paste paths need
 a signed-in browser; see the manual matrix in the plan.
 
+## Contributing
+
+Adding a fourth provider is one entry in a table and needs no understanding of
+the rest — see [CONTRIBUTING.md](CONTRIBUTING.md). When a transfer breaks it is
+almost always one stale selector; the console prints which one.
+
 ## Status
 
-v0.1.0, works unpacked. Before a Web Store submission it still needs
-`icons/icon{16,48,128}.png` and an `icons` key in the manifest.
+v1.0.0.
 
-Not planned for v1: a saved-thread library, auto-send, and an MCP server that
-would expose threads to Cursor and Claude Code. The scraped thread is versioned
-JSON (`v: 1`) specifically so that last one can be added without a rewrite.
+Not planned: a saved-thread library, auto-send, and an MCP server that would
+expose threads to Cursor and Claude Code. The scraped thread is versioned JSON
+(`v: 1`) specifically so that last one can be added without a rewrite.
+
+## License
+
+[MIT](LICENSE)

@@ -1,0 +1,70 @@
+name: A transfer stopped working
+description: Scraping, pasting, or attaching broke on one of the providers
+labels: ["selector-rot"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        These sites redesign often, and nearly every breakage is one stale
+        selector. The console output below usually identifies which one, and
+        turns this into a one-line fix.
+
+  - type: dropdown
+    id: direction
+    attributes:
+      label: Which direction
+      description: Where you sent from, and where it was going.
+      multiple: true
+      options:
+        - From ChatGPT
+        - From Claude
+        - From Gemini
+        - To ChatGPT
+        - To Claude
+        - To Gemini
+    validations:
+      required: true
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Where it broke
+      options:
+        - Could not read the conversation (nothing was sent)
+        - Nothing arrived in the target composer
+        - The conversation arrived twice
+        - The file attached but the covering note is missing
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: health
+    attributes:
+      label: Console output
+      description: |
+        Open DevTools (F12) on the tab where it went wrong and copy any line
+        starting with `[Chat Connect]`. On a failed scrape there is a `health`
+        line naming what each selector currently matches; on a transfer there
+        are `attach` and `insert` lines. This is the single most useful thing
+        in the report.
+      render: text
+      placeholder: |
+        [Chat Connect] health { provider: 'gemini', user: 0, bot: 0, composer: null, fileInputs: 1, attach: [...] }
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Extension version
+      description: The version shown at chrome://extensions.
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Screenshots, how long the conversation was, whether it had attachments.

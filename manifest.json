@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Chat Connect",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Carry an in-progress conversation between ChatGPT, Claude, and Gemini.",
   "permissions": [
     "storage"

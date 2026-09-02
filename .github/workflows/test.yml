@@ -1,0 +1,22 @@
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      # The only automated check there is: lib/format.js is the pure part, and
+      # everything else needs a signed-in browser.
+      - run: node test/format.test.js
+      # Catches a syntax error in the files the manifest loads, which the
+      # format test cannot reach.
+      - run: node --check content.js && node --check popup.js
+      - run: node -e "JSON.parse(require('fs').readFileSync('manifest.json'))"
