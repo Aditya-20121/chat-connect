@@ -25,8 +25,15 @@
     cursor: pointer;
   }
   button:hover { background: #3f3f46; }
+  input {
+    box-sizing: border-box; width: 100%; margin-bottom: 8px; padding: 8px;
+    border: 1px solid #3f3f46; border-radius: 8px;
+    background: #27272a; color: #fafafa; font: 13px system-ui, sans-serif;
+  }
+  input::placeholder { color: #71717a; }
 </style>
 <h1>Chat Connect</h1>
 <p id="status">Reading this page…</p>
+<input id="note" type="text" placeholder="what to focus on (optional)" />
 <div id="targets"></div>
 <script src="popup.js"></script>

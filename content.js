@@ -242,7 +242,7 @@ function alive() {
   }
 }
 
-async function handoff(targetId) {
+async function handoff(targetId, note) {
   const p = getProvider();
   if (!p) return { ok: false, error: 'Not a supported AI chat page.' };
   if (!alive()) {
@@ -255,7 +255,7 @@ async function handoff(targetId) {
   }
 
   await chrome.storage.local.set({
-    [PENDING]: { target: targetId, thread, ts: Date.now() },
+    [PENDING]: { target: targetId, thread, note, ts: Date.now() },
   });
   return { ok: true, count: thread.messages.length, url: PROVIDERS[targetId].newUrl };
 }
@@ -271,7 +271,7 @@ async function consumePending() {
   await chrome.storage.local.remove(PENDING);
   if (Date.now() - pending.ts > STALE_MS) return;
 
-  const text = ChatConnectFormat.toPrompt(pending.thread, p.charLimit);
+  const text = ChatConnectFormat.toPrompt(pending.thread, p.charLimit, pending.note);
   if (!(await waitFor(p.composerSel, 10000))) {
     return offerClipboard(text, `Couldn't find the ${p.label} composer — are you signed in?`);
   }
@@ -309,6 +309,13 @@ const UI_CSS = `
     color: #fafafa; background: #27272a; font: 500 12px system-ui, sans-serif;
   }
   .bar button:hover { background: #3f3f46; }
+  .bar input {
+    all: unset; width: 120px; padding: 5px 10px; border-radius: 999px;
+    background: #27272a; color: #fafafa; font: 400 12px system-ui, sans-serif;
+    transition: width .15s ease;
+  }
+  .bar input::placeholder { color: #71717a; }
+  .bar input:focus { width: 220px; background: #3f3f46; }
   .toast {
     position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
     z-index: 2147483647; display: flex; align-items: center; gap: 10px;
@@ -374,6 +381,16 @@ function mountUI() {
 
   const bar = document.createElement('div');
   bar.className = 'bar';
+
+  const note = document.createElement('input');
+  note.type = 'text';
+  note.placeholder = 'what to focus on (optional)';
+  // These apps bind single-key shortcuts on the document, so a keystroke that
+  // escapes this box focuses their composer or opens a panel mid-sentence.
+  for (const type of ['keydown', 'keyup', 'keypress']) {
+    note.addEventListener(type, (e) => e.stopPropagation());
+  }
+  bar.appendChild(note);
   bar.append('Send to');
 
   for (const target of Object.values(PROVIDERS)) {
@@ -381,7 +398,7 @@ function mountUI() {
     const btn = document.createElement('button');
     btn.textContent = target.label;
     btn.addEventListener('click', async () => {
-      const r = await handoff(target.id);
+      const r = await handoff(target.id, note.value.trim());
       if (!r.ok) return toast(r.error);
       const opened = window.open(r.url, '_blank', 'noopener');
       if (!opened) toast(`Copied ${r.count} messages.`, `Open ${target.label}`, () => window.open(r.url, '_blank'));
@@ -394,7 +411,7 @@ function mountUI() {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type !== 'handoff') return;
-  handoff(msg.target).then(sendResponse);
+  handoff(msg.target, msg.note).then(sendResponse);
   return true;
 });
 

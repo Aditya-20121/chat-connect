@@ -21,6 +21,17 @@ assert.ok(p.includes('**Me:**'), 'user label missing');
 assert.ok(p.includes('**ChatGPT:**'), 'source label missing');
 assert.ok(!p.includes('Assistant:'), 'must not label turns Assistant: -- the target model would think it wrote them');
 
+// the optional instruction line
+const noted = toPrompt(thread(short), 40000, 'focus on the SQL');
+assert.ok(noted.includes('What I want from you: focus on the SQL'), 'note missing');
+assert.ok(
+  noted.indexOf('What I want from you') < noted.indexOf('**Me:**'),
+  'the note must sit above the transcript, not be buried under it'
+);
+for (const empty of ['', '   ', undefined, null]) {
+  assert.ok(!toPrompt(thread(short), 40000, empty).includes('What I want from you'), `blank note leaked: ${JSON.stringify(empty)}`);
+}
+
 // under budget keeps everything
 const under = fitToLimit(short, 40000);
 assert.strictEqual(under.dropped, 0);

@@ -10,6 +10,7 @@ const BY_HOST = Object.fromEntries(
 
 const status = document.getElementById('status');
 const targets = document.getElementById('targets');
+const note = document.getElementById('note');
 
 (async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -17,6 +18,7 @@ const targets = document.getElementById('targets');
 
   if (!here) {
     status.textContent = 'Open a ChatGPT, Claude, or Gemini conversation to transfer it.';
+    note.remove();
     return;
   }
 
@@ -28,7 +30,11 @@ const targets = document.getElementById('targets');
     btn.textContent = p.label;
     btn.addEventListener('click', async () => {
       btn.disabled = true;
-      const r = await chrome.tabs.sendMessage(tab.id, { type: 'handoff', target: id });
+      const r = await chrome.tabs.sendMessage(tab.id, {
+        type: 'handoff',
+        target: id,
+        note: note.value.trim(),
+      });
       if (!r?.ok) {
         status.textContent = r?.error || 'Could not read this conversation.';
         btn.disabled = false;
