@@ -10,6 +10,13 @@ in the **what to focus on** box. Review it, press Enter, keep going.
 No account, no server, no data leaves your browser. The conversation is held in
 `chrome.storage.local` for the few seconds between the two tabs, then deleted.
 
+![A ChatGPT conversation with the Chat Connect bar over it](store/01-source-chatgpt.png)
+
+One click later, in Claude — the whole conversation attached as a text file,
+with a line saying what it is:
+
+![The conversation arriving in Claude as an attachment](store/03-target-claude.png)
+
 ## Install (unpacked)
 
 1. `chrome://extensions` → enable **Developer mode**
