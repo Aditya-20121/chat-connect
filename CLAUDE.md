@@ -11,7 +11,7 @@ no npm dependencies, no framework, no TypeScript.** Keep it that way.
 | File | Role |
 |---|---|
 | `content.js` | everything on-page: `PROVIDERS` registry, scrape, handoff, inject, floating button, toast |
-| `lib/format.js` | **pure** — no DOM, no `chrome.*`. `toPrompt`, `fitToLimit`. Node-requirable |
+| `lib/format.js` | **pure** — no DOM, no `chrome.*`. `toPrompt`, `toFile`, `toFileNote`, `fitToLimit`. Node-requirable |
 | `popup.html` / `popup.js` | toolbar popup |
 | `test/format.test.js` | `node test/format.test.js`, plain asserts, no framework |
 
@@ -46,6 +46,15 @@ page. Use an explicit `Range` scoped to the element (`prepareComposer`).
 `.ql-clipboard`, offscreen instances). `findVisible` filters on
 `getClientRects()` and tries selectors in priority order.
 
+**A failed upload check is not a failed upload.** `attachFile` is the only
+non-idempotent thing here -- every strategy uploads for real -- so a strategy
+that worked but could not be verified costs a duplicate attachment. Each is
+tried at most once, and each reports whether the app *consumed* the file
+(an input the app cleared, an event it called `preventDefault` on) separately
+from whether its chip is visible. Either signal stops the loop. ChatGPT renames
+uploads to a UUID, so its chip is never findable by name: it is pinned to
+`attach: ['paste']` rather than left to fall through and attach twice.
+
 **Insertion is provider-specific.** `execCommand` for ChatGPT/Claude; Gemini's
 Quill keeps only the first line of one, so it sets `pasteFirst` and takes a
 synthetic `ClipboardEvent`. Paste is not the global default because ChatGPT
@@ -60,9 +69,11 @@ All provider-specific selectors are the `PROVIDERS` table at the top of
 `content.js`. These sites redesign often; **when a transfer breaks, that table is
 almost always the whole fix.** A fourth provider is one more entry.
 
-`charLimit` (40000) is a tuning knob, not a hard cap. Lower it for a provider if
-a long paste becomes a file-attachment chip. Longer threads truncate
-newest-first, always keeping the opening message.
+Every thread transfers as a `.txt` attachment plus a short covering note, so
+nothing is trimmed to fit a composer. The inline paste is the fallback for a
+provider whose upload path cannot be driven, and `charLimit` (40000) bounds only
+that path -- `fitToLimit` truncates newest-first there, always keeping the
+opening message.
 
 ## Deliberately not built
 

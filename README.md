@@ -4,7 +4,8 @@ Carry an in-progress conversation between ChatGPT, Claude, and Gemini.
 
 You're mid-conversation on ChatGPT, you hit the free-tier wall or want a second
 opinion. Click **Send to Claude**. A new tab opens with the whole thread already
-pasted into the composer as context. Review it, press Enter, keep going.
+attached as a text file, plus a line saying what it is — and whatever you typed
+in the **what to focus on** box. Review it, press Enter, keep going.
 
 No account, no server, no data leaves your browser. The conversation is held in
 `chrome.storage.local` for the few seconds between the two tabs, then deleted.
@@ -22,7 +23,7 @@ Use either the floating **Send to** bar on the page or the toolbar popup.
 | Step | Where |
 |---|---|
 | Scrape the open thread | `content.js` → `scrapeThread` |
-| Trim to fit the target's composer | `lib/format.js` → `fitToLimit` |
+| Attach the thread as a `.txt` | `content.js` → `attachFile` |
 | Format with context framing | `lib/format.js` → `toPrompt` |
 | Stage for the target tab | `content.js` → `handoff` |
 | Paste on arrival | `content.js` → `consumePending` → `insertText` |
@@ -38,10 +39,11 @@ Everything provider-specific is the `PROVIDERS` table at the top of
 `charLimit`. These sites redesign often, so **when a provider breaks, that table
 is the only thing to fix.** Adding a fourth provider is one more entry.
 
-`charLimit` (40000 chars) is a tuning knob, not a hard limit. Lower it for a
-provider if a long paste gets converted into a file attachment chip instead of
-staying inline. Longer conversations are truncated newest-first, always keeping
-the opening message since it usually carries the task framing.
+Conversations transfer as a `.txt` attachment with a short covering note, so a
+long thread is never trimmed. If a provider's upload path can't be driven, it
+falls back to pasting inline, and `charLimit` (40000 chars) bounds that fallback
+only -- there, older messages are dropped first, always keeping the opening one
+since it usually carries the task framing.
 
 If the paste ever fails — a redesign, or you aren't signed in to the target —
 you get a **Copy conversation** button rather than a lost thread.

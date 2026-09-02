@@ -8,6 +8,10 @@ const PROVIDERS = {
     bot: { sel: '[data-message-author-role="assistant"]', textSel: '.whitespace-pre-wrap, .markdown' },
     composerSel: ['#prompt-textarea', 'div.ProseMirror[contenteditable="true"]'],
     charLimit: 40000,
+    // Only paste. ChatGPT renames an attachment to a UUID, so the filename
+    // check cannot see its own upload -- with a second strategy to fall to,
+    // that read as failure and attached the conversation twice.
+    attach: ['paste'],
   },
   claude: {
     id: 'claude',
@@ -230,6 +234,84 @@ async function insertText(selectors, text, pasteFirst) {
   return false;
 }
 
+// The rendered chip is the only generic sign an upload was accepted -- there is
+// no common event for it. Matched as a prefix because these apps middle-truncate
+// long filenames in the chip.
+const FILE_TAG = 'chat-connect';
+
+// An input restricted to images rejects a .txt silently, costing a full timeout
+// to discover. An empty accept means anything.
+function takesText(input) {
+  const accept = (input.accept || '').toLowerCase().trim();
+  return !accept || accept.includes('*/*') || accept.includes('text/plain') || accept.includes('.txt');
+}
+
+// Every one of these apps attaches through a hidden <input type="file">, and
+// assigning input.files drives the app's own upload path -- its request, its
+// progress state, its chip. A synthetic paste or drop is a guess at each app's
+// own handler by comparison, so those come second.
+// Every strategy here uploads for real, so a strategy that worked but could not
+// be verified costs a duplicate attachment. Each is tried at most once, and a
+// provider that renames what it receives is pinned to a single strategy in
+// PROVIDERS rather than left to fall through the list.
+const ATTACH = ['input', 'paste', 'drop'];
+
+async function attachFile(selectors, name, text, strategies = ATTACH) {
+  const dt = new DataTransfer();
+  dt.items.add(new File([text], name, { type: 'text/plain' }));
+  // textContent, not innerText: this is polled, and innerText forces a layout
+  // every tick.
+  const attached = () => document.body.textContent.includes(FILE_TAG);
+
+  for (const how of strategies) {
+    // Whether the app took the file, independently of whether we can see its
+    // chip. Not seeing a chip is a weak signal -- a provider may rename the
+    // file, or render it somewhere this cannot read -- and acting on it by
+    // trying the next strategy uploads the conversation a second time.
+    let consumed = () => false;
+
+    // Re-resolve every time: an upload takes seconds and these composers
+    // re-render underneath it.
+    if (how === 'input') {
+      // The first usable one only. A second input is a second real upload.
+      const input = [...document.querySelectorAll('input[type="file"]')].find(takesText);
+      if (!input) continue;
+      input.files = dt.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      // An app that handled the upload clears its input, so the same file can
+      // be picked again; one still holding ours had no listener behind it.
+      consumed = () => input.files.length === 0;
+    } else {
+      const el = findVisible(selectors);
+      if (!el) continue;
+      el.focus();
+      // dispatchEvent returns false once a handler has called preventDefault:
+      // proof the app claimed the event, chip or no chip.
+      const took = !el.dispatchEvent(
+        how === 'paste'
+          ? new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
+          : new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true })
+      );
+      consumed = () => took;
+    }
+
+    if (await waitUntil(attached, 5000, 150)) {
+      console.log('[Chat Connect] attach', { how, name });
+      return true;
+    }
+    if (consumed()) {
+      // Uploaded but unverified. Stopping here risks a note about a file that
+      // never arrived; carrying on risks attaching the thread twice, and a
+      // duplicate is the worse of the two to be left holding.
+      console.log('[Chat Connect] attach unverified', { how, name });
+      return true;
+    }
+  }
+
+  console.log('[Chat Connect] attach failed', { name, tried: strategies });
+  return false;
+}
+
 // Reloading or updating the extension orphans the content scripts already
 // running in open tabs: they keep working, but every chrome.* call throws
 // "Extension context invalidated". Checked rather than caught, so the button
@@ -274,6 +356,19 @@ async function consumePending() {
   const text = ChatConnectFormat.toPrompt(pending.thread, p.charLimit, pending.note);
   if (!(await waitFor(p.composerSel, 10000))) {
     return offerClipboard(text, `Couldn't find the ${p.label} composer — are you signed in?`);
+  }
+
+  // The file first: it carries the entire thread, where the inline paste is
+  // capped by charLimit. The paste stays as the fallback for a provider whose
+  // upload path we cannot drive.
+  const file = ChatConnectFormat.toFile(pending.thread);
+  if (await attachFile(p.composerSel, ChatConnectFormat.fileName(pending.thread), file, p.attach)) {
+    const note = ChatConnectFormat.toFileNote(pending.thread, pending.note);
+    if (await insertText(p.composerSel, note, p.pasteFirst)) {
+      return toast(`Full ${pending.thread.providerLabel} conversation attached — review it, then press Enter.`);
+    }
+    // The file is on the composer either way; only the covering note is missing.
+    return toast(`Conversation attached to ${p.label} — add a line of your own, then press Enter.`);
   }
 
   // Checking only for "not empty" was not enough: Gemini kept the opening
